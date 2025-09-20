@@ -1,0 +1,11 @@
+[package]
+name = "inet-monitoring"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+chrono = { version = "0.4.42", default-features = false, features = ["std", "clock"] }
+heck = "0.5.0"
+lazy_static = "1.5.0"
+ping = "0.6.1"
+prometheus = { version = "0.14.0", default-features = false, features = ["process"] }
