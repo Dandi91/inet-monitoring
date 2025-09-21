@@ -1,6 +1,6 @@
 use heck::ToSnakeCase;
 use lazy_static::lazy_static;
-use ping::Error;
+use ping::{Error, SocketType};
 use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use std::net::ToSocketAddrs;
 use std::thread;
@@ -49,6 +49,6 @@ fn ping_target(target: &str, timeout: Duration) -> Result<Duration, Error> {
         .expect("hostname should have at least 1 ip")
         .ip();
     let start = Instant::now();
-    ping::new(ip).timeout(timeout).send()?;
+    ping::new(ip).socket_type(SocketType::RAW).timeout(timeout).send()?;
     Ok(start.elapsed())
 }
