@@ -10,7 +10,7 @@ FROM alpine:3.19
 
 RUN apk add --no-cache openssl
 
-COPY --from=builder /build/target/release/inet-monitoring /app
+COPY --from=builder /build/target/release/inet-monitoring /app/inet-monitoring
 
 ENV PORT=9090
 ENV TARGETS=10.77.77.1,8.8.8.8,google.com,youtube.com
