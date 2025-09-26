@@ -1,3 +1,4 @@
+use crossbeam_channel::{Receiver, RecvTimeoutError};
 use heck::ToSnakeCase;
 use lazy_static::lazy_static;
 use ping::{Error, SocketType};
@@ -14,7 +15,7 @@ lazy_static! {
         register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
 }
 
-pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration) -> JoinHandle<()> {
+pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
     thread::spawn(move || {
         loop {
             for target in &targets {
@@ -37,7 +38,14 @@ pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration) -> JoinHand
                     }
                 }
             }
-            thread::sleep(delay);
+
+            match shutdown_rx.recv_timeout(delay) {
+                Ok(_) | Err(RecvTimeoutError::Disconnected) => {
+                    println!("ping thread shutting down");
+                    return;
+                }
+                Err(RecvTimeoutError::Timeout) => {}
+            }
         }
     })
 }
