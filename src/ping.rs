@@ -2,6 +2,7 @@ use crossbeam_channel::{Receiver, RecvTimeoutError};
 use heck::ToSnakeCase;
 use lazy_static::lazy_static;
 use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
+use regex::Regex;
 use std::process::Command;
 use std::str;
 use std::thread;
@@ -13,14 +14,7 @@ lazy_static! {
         register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap();
     static ref PING_FAILS: IntCounterVec =
         register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
-    
-    // Regex for "time=12.3 ms" or "time<1 ms"
-    static ref TIME_PATTERN: regex::Regex = 
-        regex::Regex::new(r"(?i)time[=<](\d+\.?\d*)\s*ms").unwrap();
-    
-    // Regex for "rtt min/avg/max/mdev = a/b/c/d ms" or "round-trip min/avg/max/stddev = a/b/c/d ms"
-    static ref RTT_PATTERN: regex::Regex = 
-        regex::Regex::new(r"(?i)(?:rtt|round[- ]?trip)\s+[^=]+=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)\s*ms").unwrap();
+    static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)/(.+)\s*ms").unwrap();
 }
 
 pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
@@ -47,22 +41,17 @@ pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx
     })
 }
 
-fn ping_args(target: &str, timeout: Duration) -> [&str; 5] {
-    // Build platform-specific args:
-    // - Linux/BusyBox: ping -c 1 -W <timeout_seconds>
-    // - macOS/BSD:     ping -c 1 -W <timeout_ms> (BSD uses milliseconds)
-    #[cfg(target_os = "macos")]
-    let timeout_arg = timeout.as_millis().max(1).to_string(); // at least 1 ms
-    #[cfg(not(target_os = "macos"))]
-    let timeout_arg = timeout.as_secs().max(1).to_string(); // at least 1 s for Linux/BusyBox
-   ["-c", "1", "-W", &timeout_arg, target]
-}
-
 /// Execute system `ping` and parse output for latency.
 /// Supports common Linux/macOS ping formats.
 /// Returns Err(...) with a short snake_case string describing the failure cause.
 fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
-    let args = ping_args(target, timeout);
+    #[cfg(target_os = "macos")]
+    let timeout_arg = "-t";
+    #[cfg(not(target_os = "macos"))]
+    let timeout_arg = "-W";
+
+    let timeout_value = timeout.as_secs().max(1).to_string();
+    let args = ["-c", "1", timeout_arg, &timeout_value, target];
 
     let output = Command::new("ping")
         .args(args)
@@ -86,20 +75,8 @@ fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
         return Err(msg.to_string());
     }
 
-    // Parse latency from stdout. Common patterns:
-    // - time=12.3 ms
-    // - time<1 ms
-    // - rtt min/avg/max/mdev = 11.234/11.234/11.234/0.000 ms
     let out = String::from_utf8_lossy(&output.stdout);
-
-    // First try time=... pattern
-    if let Some(dur) = parse_time_ms_from_line(&out) {
-        println!("pinging {} took {:?}", target, dur);
-        return Ok(dur);
-    }
-
-    // Fallback: parse avg from rtt line
-    if let Some(dur) = parse_rtt_avg_ms(&out) {
+    if let Some(dur) = parse_time_ms_from_output(&out) {
         println!("pinging {} took {:?}", target, dur);
         return Ok(dur);
     }
@@ -107,20 +84,45 @@ fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
     Err("parse_error".to_string())
 }
 
-// Extract "time=12.3 ms" or "time<1 ms" patterns
-fn parse_time_ms_from_line(s: &str) -> Option<Duration> {
+fn parse_time_ms_from_output(s: &str) -> Option<Duration> {
     TIME_PATTERN.captures(s).and_then(|caps| {
-        caps.get(1)?.as_str().parse::<f64>().ok().map(|ms| {
-            Duration::from_secs_f64(ms / 1000.0)
-        })
+        caps.get(2)?
+            .as_str()
+            .parse::<f64>()
+            .ok()
+            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
     })
 }
 
-// Extract avg from "rtt min/avg/max/mdev = a/b/c/d ms"
-fn parse_rtt_avg_ms(s: &str) -> Option<Duration> {
-    RTT_PATTERN.captures(s).and_then(|caps| {
-        caps.get(2)?.as_str().parse::<f64>().ok().map(|avg_ms| {
-            Duration::from_secs_f64(avg_ms / 1000.0)
-        })
-    })
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_time_macos() {
+        let s = r"PING 8.8.8.8 (8.8.8.8): 56 data bytes
+64 bytes from 8.8.8.8: icmp_seq=0 ttl=117 time=19.379 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 19.379/19.379/19.379/nan ms";
+        assert_eq!(
+            parse_time_ms_from_output(s),
+            Some(Duration::from_secs_f64(19.379 / 1000.0))
+        );
+    }
+
+    #[test]
+    fn test_parse_time_ms_linux() {
+        let s = r"PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=15.5 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 15.502/15.502/15.502/0.000 ms";
+        assert_eq!(
+            parse_time_ms_from_output(s),
+            Some(Duration::from_secs_f64(15.502 / 1000.0))
+        );
+    }
 }
