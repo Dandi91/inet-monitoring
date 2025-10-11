@@ -1,13 +1,10 @@
-use crossbeam_channel::{Receiver, RecvTimeoutError};
 use heck::ToSnakeCase;
 use lazy_static::lazy_static;
 use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use regex::Regex;
-use std::process::Command;
-use std::str;
-use std::thread;
-use std::thread::JoinHandle;
 use std::time::Duration;
+use tokio::process::Command;
+use tokio::time::sleep;
 
 lazy_static! {
     static ref PING_DELAY: HistogramVec =
@@ -17,34 +14,25 @@ lazy_static! {
     static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)(/.+)?\s*ms").unwrap();
 }
 
-pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
-    thread::spawn(move || {
-        loop {
-            for target in &targets {
-                match ping_target(target, timeout) {
-                    Ok(latency) => PING_DELAY.with_label_values(&[target]).observe(latency.as_secs_f64()),
-                    Err(err) => {
-                        eprintln!("failed to ping {}: {}", target, err);
-                        PING_FAILS.with_label_values(&[target, &err.to_snake_case()]).inc();
-                    }
+pub async fn run(targets: Vec<String>, delay: Duration, timeout: Duration) {
+    loop {
+        for target in &targets {
+            match ping_target(target, timeout).await {
+                Ok(latency) => PING_DELAY.with_label_values(&[target]).observe(latency.as_secs_f64()),
+                Err(err) => {
+                    eprintln!("failed to ping {}: {}", target, err);
+                    PING_FAILS.with_label_values(&[target, &err.to_snake_case()]).inc();
                 }
-            }
-
-            match shutdown_rx.recv_timeout(delay) {
-                Ok(_) | Err(RecvTimeoutError::Disconnected) => {
-                    println!("ping thread shutting down");
-                    return;
-                }
-                Err(RecvTimeoutError::Timeout) => {}
             }
         }
-    })
+        sleep(delay).await;
+    }
 }
 
 /// Execute system `ping` and parse output for latency.
 /// Supports common Linux/macOS ping formats.
 /// Returns Err(...) with a short snake_case string describing the failure cause.
-fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
+async fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
     #[cfg(target_os = "macos")]
     let timeout_arg = "-t";
     #[cfg(not(target_os = "macos"))]
@@ -56,6 +44,7 @@ fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
     let output = Command::new("ping")
         .args(args)
         .output()
+        .await
         .map_err(|e| format!("io_error_{}", e.kind().to_string().to_snake_case()))?;
 
     if !output.status.success() {

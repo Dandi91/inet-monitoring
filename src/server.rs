@@ -1,65 +1,39 @@
+use std::net::SocketAddr;
 use chrono::Local;
-use crossbeam_channel::{Receiver, select};
 use lazy_static::lazy_static;
 use prometheus::{Encoder, TextEncoder};
-use std::io::{BufRead, BufReader, Write};
-use std::net::{TcpListener, TcpStream};
-use std::thread;
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+use tokio::net::{TcpListener, TcpStream};
 
 lazy_static! {
     static ref encoder: TextEncoder = TextEncoder::new();
     static ref headers: String = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n", encoder.format_type());
 }
 
-fn handle_connection(mut stream: TcpStream) {
-    let remote = stream.peer_addr().unwrap();
-    let mut reader = BufReader::new(&stream);
+async fn handle_connection(mut stream: TcpStream, remote: SocketAddr) {
+    let (stream_read, mut stream_write) = stream.split();
+    let mut reader = BufReader::new(stream_read);
     let mut request = String::with_capacity(128);
-    reader.read_line(&mut request).unwrap_or_default();
+    reader.read_line(&mut request).await.unwrap_or_default();
 
-    stream.write_all(headers.as_bytes()).unwrap_or_default();
+    let mut buffer = Vec::with_capacity(8*1024);
     let metrics = prometheus::gather();
-    encoder.encode(&metrics, &mut stream).unwrap_or_default();
+    encoder.encode(&metrics, &mut buffer).unwrap_or_default();
 
-    stream.shutdown(std::net::Shutdown::Both).unwrap_or_default();
+    stream_write.write_all(headers.as_bytes()).await.unwrap_or_default();
+    stream_write.write_all(&buffer).await.unwrap_or_default();
+
+    stream.shutdown().await.unwrap_or_default();
     println!("{} {} {}", Local::now().to_rfc3339(), remote.ip(), request.trim_end());
 }
 
-pub fn serve(port: u16, shutdown_rx: Receiver<()>) -> thread::JoinHandle<()> {
-    thread::spawn(move || {
-        let listener = TcpListener::bind(("0.0.0.0", port)).expect("unable to start HTTP server");
-        println!("Listening to connections on port {}", port);
 
-        let (conn_tx, conn_rx) = crossbeam_channel::unbounded::<TcpStream>();
-        let accept = listener.try_clone().expect("failed to clone listener");
-        thread::spawn(move || {
-            for stream in accept.incoming() {
-                match stream {
-                    Ok(stream) => {
-                        if conn_tx.send(stream).is_err() {
-                            break;
-                        }
-                    }
-                    Err(_) => break,
-                }
-            }
-        });
+pub async fn serve(port: u16) {
+    let listener = TcpListener::bind(("0.0.0.0", port)).await.expect("unable to start HTTP server");
+    println!("Listening to connections on port {}", port);
 
-        loop {
-            select! {
-                recv(shutdown_rx) -> _ => {
-                    println!("server thread shutting down");
-                    drop(listener);  // closes listener socket which stops connection-accepting thread
-                    return;
-                },
-                recv(conn_rx) -> conn => {
-                    if let Ok(stream) = conn {
-                        handle_connection(stream);
-                    } else {
-                        return;
-                    }
-                }
-            }
-        }
-    })
+    loop {
+        let (stream, remote) = listener.accept().await.expect("failed to accept connection");
+        tokio::spawn(handle_connection(stream, remote));
+    }
 }
