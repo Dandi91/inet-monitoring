@@ -14,7 +14,7 @@ lazy_static! {
         register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap();
     static ref PING_FAILS: IntCounterVec =
         register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
-    static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)/(.+)\s*ms").unwrap();
+    static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)(/.+)?\s*ms").unwrap();
 }
 
 pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
@@ -123,6 +123,20 @@ rtt min/avg/max/mdev = 15.502/15.502/15.502/0.000 ms";
         assert_eq!(
             parse_time_ms_from_output(s),
             Some(Duration::from_secs_f64(15.502 / 1000.0))
+        );
+    }
+
+    #[test]
+    fn test_parse_time_ms_busybox() {
+        let s = r"PING 8.8.8.8 (8.8.8.8): 56 data bytes
+64 bytes from 8.8.8.8: seq=0 ttl=116 time=16.636 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 packets received, 0% packet loss
+round-trip min/avg/max = 16.636/16.636/16.636 ms";
+        assert_eq!(
+            parse_time_ms_from_output(s),
+            Some(Duration::from_secs_f64(16.636 / 1000.0))
         );
     }
 }
