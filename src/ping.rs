@@ -1,18 +1,20 @@
 use crossbeam_channel::{Receiver, RecvTimeoutError};
 use heck::ToSnakeCase;
 use lazy_static::lazy_static;
-use ping::{Error, SocketType};
 use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
-use std::net::ToSocketAddrs;
+use regex::Regex;
+use std::process::Command;
+use std::str;
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 lazy_static! {
     static ref PING_DELAY: HistogramVec =
         register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap();
     static ref PING_FAILS: IntCounterVec =
         register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
+    static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)/(.+)\s*ms").unwrap();
 }
 
 pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
@@ -23,18 +25,7 @@ pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx
                     Ok(latency) => PING_DELAY.with_label_values(&[target]).observe(latency.as_secs_f64()),
                     Err(err) => {
                         eprintln!("failed to ping {}: {}", target, err);
-                        PING_FAILS
-                            .with_label_values(&[
-                                target,
-                                &match err {
-                                    Error::InvalidProtocol => "invalid_protocol".to_string(),
-                                    Error::InternalError => "internal_error".to_string(),
-                                    Error::DecodeV4Error => "decode_v4_error".to_string(),
-                                    Error::DecodeEchoReplyError => "decode_echo_reply_error".to_string(),
-                                    Error::IoError { error } => error.kind().to_string().to_snake_case(),
-                                },
-                            ])
-                            .inc();
+                        PING_FAILS.with_label_values(&[target, &err.to_snake_case()]).inc();
                     }
                 }
             }
@@ -50,13 +41,88 @@ pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx
     })
 }
 
-fn ping_target(target: &str, timeout: Duration) -> Result<Duration, Error> {
-    let ip = (target, 0)
-        .to_socket_addrs()?
-        .next()
-        .expect("hostname should have at least 1 ip")
-        .ip();
-    let start = Instant::now();
-    ping::new(ip).socket_type(SocketType::RAW).timeout(timeout).send()?;
-    Ok(start.elapsed())
+/// Execute system `ping` and parse output for latency.
+/// Supports common Linux/macOS ping formats.
+/// Returns Err(...) with a short snake_case string describing the failure cause.
+fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
+    #[cfg(target_os = "macos")]
+    let timeout_arg = "-t";
+    #[cfg(not(target_os = "macos"))]
+    let timeout_arg = "-W";
+
+    let timeout_value = timeout.as_secs().max(1).to_string();
+    let args = ["-c", "1", timeout_arg, &timeout_value, target];
+
+    let output = Command::new("ping")
+        .args(args)
+        .output()
+        .map_err(|e| format!("io_error_{}", e.kind().to_string().to_snake_case()))?;
+
+    if !output.status.success() {
+        // Non-zero exit usually means timeout or unreachable.
+        // Try to detect timeout keywords from stderr/stdout.
+        let stderr = String::from_utf8_lossy(&output.stderr).to_lowercase();
+        let stdout = String::from_utf8_lossy(&output.stdout).to_lowercase();
+        let msg = if stderr.contains("timed out") || stdout.contains("timed out") || stdout.contains("timeout") {
+            "timeout"
+        } else if stderr.contains("unknown host") || stdout.contains("unknown host") {
+            "unknown_host"
+        } else if stderr.contains("permission") {
+            "permission_denied"
+        } else {
+            "nonzero_exit"
+        };
+        return Err(msg.to_string());
+    }
+
+    let out = String::from_utf8_lossy(&output.stdout);
+    if let Some(dur) = parse_time_ms_from_output(&out) {
+        println!("pinging {} took {:?}", target, dur);
+        return Ok(dur);
+    }
+
+    Err("parse_error".to_string())
+}
+
+fn parse_time_ms_from_output(s: &str) -> Option<Duration> {
+    TIME_PATTERN.captures(s).and_then(|caps| {
+        caps.get(2)?
+            .as_str()
+            .parse::<f64>()
+            .ok()
+            .map(|ms| Duration::from_secs_f64(ms / 1000.0))
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_parse_time_macos() {
+        let s = r"PING 8.8.8.8 (8.8.8.8): 56 data bytes
+64 bytes from 8.8.8.8: icmp_seq=0 ttl=117 time=19.379 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 packets received, 0.0% packet loss
+round-trip min/avg/max/stddev = 19.379/19.379/19.379/nan ms";
+        assert_eq!(
+            parse_time_ms_from_output(s),
+            Some(Duration::from_secs_f64(19.379 / 1000.0))
+        );
+    }
+
+    #[test]
+    fn test_parse_time_ms_linux() {
+        let s = r"PING 8.8.8.8 (8.8.8.8) 56(84) bytes of data.
+64 bytes from 8.8.8.8: icmp_seq=1 ttl=117 time=15.5 ms
+
+--- 8.8.8.8 ping statistics ---
+1 packets transmitted, 1 received, 0% packet loss, time 0ms
+rtt min/avg/max/mdev = 15.502/15.502/15.502/0.000 ms";
+        assert_eq!(
+            parse_time_ms_from_output(s),
+            Some(Duration::from_secs_f64(15.502 / 1000.0))
+        );
+    }
 }
