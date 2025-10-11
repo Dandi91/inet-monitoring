@@ -13,6 +13,14 @@ lazy_static! {
         register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap();
     static ref PING_FAILS: IntCounterVec =
         register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
+    
+    // Regex for "time=12.3 ms" or "time<1 ms"
+    static ref TIME_PATTERN: regex::Regex = 
+        regex::Regex::new(r"(?i)time[=<](\d+\.?\d*)\s*ms").unwrap();
+    
+    // Regex for "rtt min/avg/max/mdev = a/b/c/d ms" or "round-trip min/avg/max/stddev = a/b/c/d ms"
+    static ref RTT_PATTERN: regex::Regex = 
+        regex::Regex::new(r"(?i)(?:rtt|round[- ]?trip)\s+[^=]+=\s*([\d.]+)/([\d.]+)/([\d.]+)/([\d.]+)\s*ms").unwrap();
 }
 
 pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx: Receiver<()>) -> JoinHandle<()> {
@@ -39,23 +47,22 @@ pub fn run(targets: Vec<String>, delay: Duration, timeout: Duration, shutdown_rx
     })
 }
 
-/// Execute system `ping` and parse output for latency.
-/// Supports common Linux/macOS ping formats.
-/// Returns Err(...) with a short snake_case string describing the failure cause.
-fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
+fn ping_args(target: &str, timeout: Duration) -> [&str; 5] {
     // Build platform-specific args:
     // - Linux/BusyBox: ping -c 1 -W <timeout_seconds>
     // - macOS/BSD:     ping -c 1 -W <timeout_ms> (BSD uses milliseconds)
     #[cfg(target_os = "macos")]
-    let timeout_arg = (timeout.as_millis().max(1)).to_string(); // at least 1 ms
+    let timeout_arg = timeout.as_millis().max(1).to_string(); // at least 1 ms
     #[cfg(not(target_os = "macos"))]
-    let timeout_arg = (timeout.as_secs().max(1)).to_string(); // at least 1 s for Linux/BusyBox
+    let timeout_arg = timeout.as_secs().max(1).to_string(); // at least 1 s for Linux/BusyBox
+   ["-c", "1", "-W", &timeout_arg, target]
+}
 
-    #[cfg(target_os = "macos")]
-    let args = ["-c", "1", "-W", &timeout_arg, target];
-
-    #[cfg(not(target_os = "macos"))]
-    let args = ["-c", "1", "-W", &timeout_arg, target];
+/// Execute system `ping` and parse output for latency.
+/// Supports common Linux/macOS ping formats.
+/// Returns Err(...) with a short snake_case string describing the failure cause.
+fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
+    let args = ping_args(target, timeout);
 
     let output = Command::new("ping")
         .args(args)
@@ -102,67 +109,18 @@ fn ping_target(target: &str, timeout: Duration) -> Result<Duration, String> {
 
 // Extract "time=12.3 ms" or "time<1 ms" patterns
 fn parse_time_ms_from_line(s: &str) -> Option<Duration> {
-    // Find "time=" occurrence
-    for line in s.lines() {
-        let lower = line.to_lowercase();
-        if let Some(idx) = lower.find("time=") {
-            let rest = &lower[idx + 5..];
-            // Accept forms like "12.3 ms", "0.8 ms", "<1 ms"
-            // Strip leading '<' if present
-            let rest = rest.trim_start();
-            let rest = rest.strip_prefix('<').unwrap_or(rest);
-            // Take until " ms"
-            if let Some(ms_idx) = rest.find(" ms") {
-                let num = &rest[..ms_idx].trim();
-                if let Ok(v) = num.parse::<f64>() {
-                    // value given is in milliseconds
-                    let secs = v / 1000.0;
-                    return Some(Duration::from_secs_f64(secs));
-                }
-            }
-        }
-    }
-    None
+    TIME_PATTERN.captures(s).and_then(|caps| {
+        caps.get(1)?.as_str().parse::<f64>().ok().map(|ms| {
+            Duration::from_secs_f64(ms / 1000.0)
+        })
+    })
 }
 
 // Extract avg from "rtt min/avg/max/mdev = a/b/c/d ms"
 fn parse_rtt_avg_ms(s: &str) -> Option<Duration> {
-    for line in s.lines() {
-        let lower = line.to_lowercase();
-        if lower.contains("rtt ") && lower.contains(" ms") && lower.contains('/') {
-            // find part after '='
-            if let Some(eq_idx) = lower.find('=') {
-                let rest = lower[eq_idx + 1..].trim();
-                // rest like "a/b/c/d ms"
-                if let Some(ms_idx) = rest.find(" ms") {
-                    let nums = &rest[..ms_idx];
-                    let mut parts = nums.split('/');
-                    let _min = parts.next()?;
-                    let avg = parts.next()?;
-                    if let Ok(v) = avg.trim().parse::<f64>() {
-                        return Some(Duration::from_secs_f64(v / 1000.0));
-                    }
-                }
-            }
-        }
-        // BSD/macOS line like: "round-trip min/avg/max/stddev = a/b/c/d ms"
-        if (lower.contains("round-trip") || lower.contains("round trip"))
-            && lower.contains(" ms")
-            && lower.contains('/')
-        {
-            if let Some(eq_idx) = lower.find('=') {
-                let rest = lower[eq_idx + 1..].trim();
-                if let Some(ms_idx) = rest.find(" ms") {
-                    let nums = &rest[..ms_idx];
-                    let mut parts = nums.split('/');
-                    let _min = parts.next()?;
-                    let avg = parts.next()?;
-                    if let Ok(v) = avg.trim().parse::<f64>() {
-                        return Some(Duration::from_secs_f64(v / 1000.0));
-                    }
-                }
-            }
-        }
-    }
-    None
+    RTT_PATTERN.captures(s).and_then(|caps| {
+        caps.get(2)?.as_str().parse::<f64>().ok().map(|avg_ms| {
+            Duration::from_secs_f64(avg_ms / 1000.0)
+        })
+    })
 }
