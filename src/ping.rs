@@ -1,18 +1,20 @@
 use heck::ToSnakeCase;
-use lazy_static::lazy_static;
 use prometheus::{HistogramVec, IntCounterVec, register_histogram_vec, register_int_counter_vec};
 use regex::Regex;
+use std::sync::LazyLock;
 use std::time::Duration;
 use tokio::process::Command;
 use tokio::time::sleep;
 
-lazy_static! {
-    static ref PING_DELAY: HistogramVec =
-        register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap();
-    static ref PING_FAILS: IntCounterVec =
-        register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap();
-    static ref TIME_PATTERN: Regex = Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)(/.+)?\s*ms").unwrap();
-}
+static PING_DELAY: LazyLock<HistogramVec> =
+    LazyLock::new(|| register_histogram_vec!("ping_delay_seconds", "ping delay in seconds", &["hostname"]).unwrap());
+
+static PING_FAILS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!("ping_fails", "number of failed pings", &["hostname", "error_type"]).unwrap()
+});
+
+static TIME_PATTERN: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"(?i)(?:rtt|round[- ]?trip).*=\s*(.+)/(.+)/(.+)(/.+)?\s*ms").unwrap());
 
 pub async fn run(targets: Vec<String>, delay: Duration, timeout: Duration) {
     loop {

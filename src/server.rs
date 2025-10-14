@@ -1,14 +1,18 @@
 use chrono::Local;
-use lazy_static::lazy_static;
 use prometheus::{Encoder, TextEncoder};
 use std::net::SocketAddr;
+use std::sync::LazyLock;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::{TcpListener, TcpStream};
 
-lazy_static! {
-    static ref encoder: TextEncoder = TextEncoder::new();
-    static ref headers: String = format!("HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\r\n", encoder.format_type());
-}
+static HEADERS: LazyLock<String> = LazyLock::new(|| {
+    [
+        "HTTP/1.1 200 OK",
+        &format!("Content-Type: {}", TextEncoder::new().format_type()),
+        "\r\n",
+    ]
+    .join("\r\n")
+});
 
 async fn handle_connection(mut stream: TcpStream, remote: SocketAddr) {
     let (stream_read, mut stream_write) = stream.split();
@@ -18,9 +22,9 @@ async fn handle_connection(mut stream: TcpStream, remote: SocketAddr) {
 
     let mut buffer = Vec::with_capacity(8 * 1024);
     let metrics = prometheus::gather();
-    encoder.encode(&metrics, &mut buffer).unwrap_or_default();
+    TextEncoder::new().encode(&metrics, &mut buffer).unwrap_or_default();
 
-    stream_write.write_all(headers.as_bytes()).await.unwrap_or_default();
+    stream_write.write_all(HEADERS.as_bytes()).await.unwrap_or_default();
     stream_write.write_all(&buffer).await.unwrap_or_default();
 
     stream.shutdown().await.unwrap_or_default();
