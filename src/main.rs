@@ -1,10 +1,9 @@
 mod config;
 mod ping;
 mod server;
+mod speedtest;
 
 use crate::config::Config;
-use crate::ping::run;
-use crate::server::serve;
 use std::time::Duration;
 use tokio::{signal, task};
 
@@ -12,11 +11,15 @@ use tokio::{signal, task};
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let config = Config::load();
 
-    task::spawn(serve(config.port));
-    task::spawn(run(
+    task::spawn(server::serve(config.port));
+    task::spawn(ping::run(
         config.targets,
         Duration::from_secs_f32(config.delay),
         Duration::from_secs_f32(config.timeout),
+    ));
+    task::spawn(speedtest::run(
+        Duration::from_secs_f32(config.speedtest_interval),
+        Duration::from_secs_f32(config.speedtest_timeout),
     ));
 
     signal::ctrl_c().await?;
