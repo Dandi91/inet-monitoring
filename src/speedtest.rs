@@ -42,8 +42,12 @@ pub async fn run(delay: Duration, timeout: Duration) {
             Ok(result) => {
                 println!(
                     "speedtest performed against {}:{} ({}) - {} ({}, {})",
-                    result.server.host, result.server.port, result.server.ip,
-                    result.server.name, result.server.location, result.server.country
+                    result.server.host,
+                    result.server.port,
+                    result.server.ip,
+                    result.server.name,
+                    result.server.location,
+                    result.server.country
                 );
 
                 SPEED
@@ -122,6 +126,7 @@ struct StreamLatency {
 #[serde_as]
 #[derive(Deserialize)]
 struct IdleLatency {
+    #[serde(default = "default_latency")]
     #[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
     latency: Duration,
     #[serde_as(as = "DurationMilliSecondsWithFrac<f64>")]
@@ -157,9 +162,17 @@ struct SpeedtestResult {
     ping: IdleLatency,
     download: StreamResult,
     upload: StreamResult,
-    #[serde(rename = "packetLoss")]
+    #[serde(rename = "packetLoss", default = "default_packet_loss")]
     packet_loss: f64,
     server: Server,
+}
+
+fn default_packet_loss() -> f64 {
+    0.0
+}
+
+fn default_latency() -> Duration {
+    Duration::from_secs(0)
 }
 
 async fn speedtest(timeout_dur: Duration) -> Result<SpeedtestResult, String> {
@@ -190,7 +203,6 @@ mod tests {
             "timestamp": "2025-10-26T11:36:26Z",
             "ping": {
                 "jitter": 3.245,
-                "latency": 17.634,
                 "low": 13.379,
                 "high": 21.874
             },
@@ -216,7 +228,6 @@ mod tests {
                     "jitter": 52.124
                 }
             },
-            "packetLoss": 0,
             "server": {
                 "id": 52365,
                 "host": "speedtest.ams.t-mobile.nl",
