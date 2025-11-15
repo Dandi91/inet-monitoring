@@ -75,30 +75,34 @@ pub async fn run(delay: Duration, timeout: Duration) {
                 LATENCY
                     .with_label_values(&["idle", "jitter"])
                     .observe(result.ping.jitter.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["download", "latency"])
-                    .observe(result.download.latency.mean.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["download", "low"])
-                    .observe(result.download.latency.low.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["download", "high"])
-                    .observe(result.download.latency.high.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["download", "jitter"])
-                    .observe(result.download.latency.jitter.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["upload", "latency"])
-                    .observe(result.upload.latency.mean.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["upload", "low"])
-                    .observe(result.upload.latency.low.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["upload", "high"])
-                    .observe(result.upload.latency.high.as_secs_f64());
-                LATENCY
-                    .with_label_values(&["upload", "jitter"])
-                    .observe(result.upload.latency.jitter.as_secs_f64());
+                if let Some(latency) = result.download.latency {
+                    LATENCY
+                        .with_label_values(&["download", "latency"])
+                        .observe(latency.mean.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["download", "low"])
+                        .observe(latency.low.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["download", "high"])
+                        .observe(latency.high.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["download", "jitter"])
+                        .observe(latency.jitter.as_secs_f64());
+                }
+                if let Some(latency) = result.upload.latency {
+                    LATENCY
+                        .with_label_values(&["upload", "latency"])
+                        .observe(latency.mean.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["upload", "low"])
+                        .observe(latency.low.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["upload", "high"])
+                        .observe(latency.high.as_secs_f64());
+                    LATENCY
+                        .with_label_values(&["upload", "jitter"])
+                        .observe(latency.jitter.as_secs_f64());
+                }
             }
             Err(err) => {
                 eprintln!("failed to perform speedtest: {}", err);
@@ -144,7 +148,7 @@ struct StreamResult {
     bytes: u64,
     #[serde_as(as = "DurationMilliSeconds<u64>")]
     elapsed: Duration,
-    latency: StreamLatency,
+    latency: Option<StreamLatency>,
 }
 
 #[derive(Deserialize)]
@@ -221,12 +225,6 @@ mod tests {
                 "bandwidth": 12071584,
                 "bytes": 97041069,
                 "elapsed": 8101,
-                "latency": {
-                    "iqm": 177.390,
-                    "low": 10.735,
-                    "high": 322.531,
-                    "jitter": 52.124
-                }
             },
             "server": {
                 "id": 52365,
@@ -241,7 +239,9 @@ mod tests {
         let result: SpeedtestResult = serde_json::from_str(input).unwrap();
         assert_eq!(result.ping.latency, Duration::from_micros(17634));
         assert_eq!(result.download.bandwidth, 115116205);
+        assert_eq!(result.download.latency.unwrap().mean, Duration::from_micros(69730));
         assert_eq!(result.upload.bandwidth, 12071584);
+        assert_eq!(result.upload.latency.is_none(), true);
         assert_eq!(result.packet_loss, 0.0);
         assert_eq!(result.server.host, "speedtest.ams.t-mobile.nl");
         assert_eq!(result.server.port, 8080);
